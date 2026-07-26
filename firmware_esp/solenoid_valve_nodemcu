@@ -1,1 +1,241 @@
-  
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ESP8266mDNS.h>
+#include <time.h>
+
+// ==================== HARDWARE ====================
+
+#define RELAY1_PIN D1
+#define RELAY2_PIN D2
+const bool RELAY_ACTIVE_LOW = true;
+
+// ==================== WIFI & MQTT ====================
+
+const char* ssid            = "WIFI_SSID";
+const char* password        = " WIFI_PASSWORD";
+
+const char* mqtt_broker     = "abcdef.s1.eu.hivemq.cloud";
+const int   mqtt_port       = 8883;
+const char* mqtt_user       = "NodeMCU_2";
+const char* mqtt_pass       = "MQTT_PAssword";
+const char* clientId        = "garden_valves_01";
+
+const char* topic_z1_cmd    = "home/garden/zone1/command";
+const char* topic_z2_cmd    = "home/garden/zone2/command";
+const char* topic_z1_state  = "home/garden/zone1/state";
+const char* topic_z2_state  = "home/garden/zone2/state";
+const char* topic_status    = "home/garden/status";
+const char* topic_telemetry = "home/garden/telemetry";
+
+// ==================== NTP ====================
+
+const char* ntp_server      = "asia.pool.ntp.org";   // Faster from India
+const long  gmt_offset_sec  = 19800;
+const int   daylight_offset = 0;
+
+// ==================== GLOBALS ====================
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+unsigned long lastReconnectAttempt = 0;
+unsigned long lastTelemetry        = 0;
+const unsigned long TELEMETRY_MS   = 30000;
+
+// ==================== SETUP ====================
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n[BOOT] Garden Valve Controller");
+
+  pinMode(RELAY1_PIN, OUTPUT);
+  pinMode(RELAY2_PIN, OUTPUT);
+  setRelay(1, false);
+  setRelay(2, false);
+  Serial.println("[HW] Relays initialized OFF");
+
+  setupWiFi();
+
+  // NTP: start sync, then wait up to 15s for first sync
+  configTime(gmt_offset_sec, daylight_offset, ntp_server);
+  waitForNTP(15);
+
+  espClient.setInsecure();
+  client.setServer(mqtt_broker, mqtt_port);
+  client.setCallback(mqttCallback);
+  Serial.println("[MQTT] Broker configured");
+
+  if (MDNS.begin("garden-valves")) {
+    Serial.println("[mDNS] garden-valves.local ready");
+  } else {
+    Serial.println("[mDNS] FAILED");
+  }
+}
+
+// ==================== WIFI ====================
+
+void setupWiFi() {
+  Serial.print("[WiFi] Connecting");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(250);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\n[WiFi] OK  IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\n[WiFi] FAILED — rebooting...");
+    delay(3000);
+    ESP.restart();
+  }
+}
+
+// ==================== NTP ====================
+
+bool waitForNTP(int timeoutSec) {
+  Serial.print("[NTP] Syncing");
+  for (int i = 0; i < timeoutSec; i++) {
+    time_t now = time(nullptr);
+    if (now > 1000000000) {          // Year 2001+ = synced
+      Serial.println("  OK");
+      return true;
+    }
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("  TIMEOUT — will retry in loop");
+  return false;
+}
+
+// ==================== MQTT ====================
+
+bool mqttConnect() {
+  Serial.print("[MQTT] Connecting... ");
+
+  bool ok = client.connect(clientId, mqtt_user, mqtt_pass,
+                           topic_status, 0, true, "offline");
+
+  if (ok) {
+    Serial.println("OK");
+    client.publish(topic_status, "online", true);
+    Serial.println("[MQTT] Birth: online");
+
+    client.subscribe(topic_z1_cmd);
+    client.subscribe(topic_z2_cmd);
+    Serial.println("[MQTT] Subscribed to zone commands");
+
+    publishState(1);
+    publishState(2);
+    publishTelemetry();
+  } else {
+    Serial.print("FAILED rc=");
+    Serial.println(client.state());
+  }
+  return ok;
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+
+  Serial.print("[CMD] ");
+  Serial.print(topic);
+  Serial.print(" = ");
+  Serial.println(msg);
+
+  if (String(topic) == topic_z1_cmd) {
+    bool on = (msg == "ON" || msg == "on" || msg == "1");
+    setRelay(1, on);
+    publishState(1);
+    publishTelemetry();
+  }
+  else if (String(topic) == topic_z2_cmd) {
+    bool on = (msg == "ON" || msg == "on" || msg == "1");
+    setRelay(2, on);
+    publishState(2);
+    publishTelemetry();
+  }
+}
+
+void publishState(int zone) {
+  const char* topic = (zone == 1) ? topic_z1_state : topic_z2_state;
+  bool state = getRelayState(zone);
+  const char* payload = state ? "ON" : "OFF";
+  client.publish(topic, payload);
+  Serial.print("[PUB] ");
+  Serial.print(topic);
+  Serial.print(" = ");
+  Serial.println(payload);
+}
+
+void publishTelemetry() {
+  time_t now = time(nullptr);
+  struct tm* ti = localtime(&now);
+
+  char ts[30];
+  if (now > 1000000000) {
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", ti);
+  } else {
+    strcpy(ts, "Syncing...");
+  }
+
+  String json = "{\"timestamp\":\"";
+  json += ts;
+  json += "\",\"zone1\":\"";
+  json += getRelayState(1) ? "ON" : "OFF";
+  json += "\",\"zone2\":\"";
+  json += getRelayState(2) ? "ON" : "OFF";
+  json += "\"}";
+
+  client.publish(topic_telemetry, json.c_str());
+  Serial.print("[PUB] telemetry: ");
+  Serial.println(json);
+}
+
+// ==================== RELAY ====================
+
+void setRelay(int zone, bool on) {
+  int pin = (zone == 1) ? RELAY1_PIN : RELAY2_PIN;
+  bool writeVal = RELAY_ACTIVE_LOW ? !on : on;
+  digitalWrite(pin, writeVal);
+}
+
+bool getRelayState(int zone) {
+  int pin = (zone == 1) ? RELAY1_PIN : RELAY2_PIN;
+  bool readVal = digitalRead(pin);
+  return RELAY_ACTIVE_LOW ? !readVal : readVal;
+}
+
+// ==================== LOOP ====================
+
+void loop() {
+  MDNS.update();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Lost — reconnecting");
+    setupWiFi();
+  }
+
+  if (!client.connected()) {
+    unsigned long now = millis();
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      mqttConnect();
+    }
+  } else {
+    client.loop();
+  }
+
+  if (client.connected() && millis() - lastTelemetry > TELEMETRY_MS) {
+    lastTelemetry = millis();
+    publishTelemetry();
+  }
+}  
