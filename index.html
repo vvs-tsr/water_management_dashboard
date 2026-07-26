@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Water Tank — Kerala</title>
+<script src="https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt-min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: linear-gradient(135deg, #0b1220 0%, #1e293b 50%, #0f172a 100%);
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+  }
+  h1 { font-weight: 300; letter-spacing: 3px; font-size: 1.6rem; margin-bottom: 0.3rem; }
+  .subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 2rem; }
+
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 2rem;
+    padding: 0.4rem 1rem;
+    background: rgba(15, 23, 42, 0.6);
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    font-size: 0.8rem;
+    color: #94a3b8;
+  }
+  .status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #ef4444;
+    box-shadow: 0 0 6px #ef4444;
+    transition: all 0.4s ease;
+  }
+  .status-dot.connected {
+    background: #22c55e;
+    box-shadow: 0 0 8px #22c55e;
+  }
+
+  .dashboard {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1.2rem;
+    width: 100%;
+    max-width: 400px;
+  }
+
+  .card {
+    background: rgba(30, 41, 59, 0.5);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(148, 163, 184, 0.1);
+    border-radius: 24px;
+    padding: 1.8rem 1.5rem;
+    text-align: center;
+    transition: transform 0.2s;
+  }
+  .card:hover { transform: translateY(-2px); }
+
+  /* Tank Animation */
+  .tank-wrap {
+    position: relative;
+    width: 160px;
+    height: 240px;
+    margin: 0 auto 1.2rem;
+    background: rgba(15, 23, 42, 0.7);
+    border: 3px solid #334155;
+    border-radius: 0 0 24px 24px;
+    overflow: hidden;
+  }
+  .tank-wrap::before {
+    content: '';
+    position: absolute;
+    top: -3px; left: -3px; right: -3px;
+    height: 18px;
+    border: 3px solid #334155;
+    border-bottom: none;
+    border-radius: 24px 24px 0 0;
+    z-index: 3;
+  }
+  .tank-wrap::after {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(90deg, rgba(255,255,255,0.03) 0%, transparent 20%, transparent 80%, rgba(255,255,255,0.03) 100%);
+    z-index: 2;
+    pointer-events: none;
+  }
+  .water {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    background: linear-gradient(180deg, #38bdf8 0%, #0ea5e9 40%, #0284c7 100%);
+    transition: height 0.9s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.95;
+    z-index: 1;
+  }
+  .water::before {
+    content: '';
+    position: absolute;
+    top: -12px; left: -50%; right: -50%;
+    width: 200%; height: 24px;
+    background: rgba(56, 189, 248, 0.35);
+    border-radius: 45%;
+    animation: wave 5s linear infinite;
+  }
+  .water::after {
+    content: '';
+    position: absolute;
+    top: -8px; left: -50%; right: -50%;
+    width: 200%; height: 20px;
+    background: rgba(14, 165, 233, 0.2);
+    border-radius: 42%;
+    animation: wave 7s linear infinite reverse;
+  }
+  @keyframes wave {
+    0% { transform: translateX(0) rotate(0deg); }
+    100% { transform: translateX(-25%) rotate(360deg); }
+  }
+
+  .percent-value {
+    font-size: 3.6rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    line-height: 1;
+    margin-bottom: 0.2rem;
+  }
+  .percent-label {
+    color: #94a3b8;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+
+  .metric-row {
+    display: flex;
+    justify-content: space-around;
+    margin-top: 1.2rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid rgba(148, 163, 184, 0.1);
+  }
+  .metric { text-align: center; }
+  .metric-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #f8fafc;
+  }
+  .metric-label {
+    font-size: 0.7rem;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 0.2rem;
+  }
+
+  .timestamp {
+    font-family: 'SF Mono', 'Courier New', monospace;
+    font-size: 0.75rem;
+    color: #475569;
+    margin-top: 1rem;
+  }
+
+  .history-card { padding: 1.2rem 1.5rem; }
+  .history-title {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin-bottom: 0.8rem;
+    text-align: left;
+  }
+  .history-list {
+    max-height: 160px;
+    overflow-y: auto;
+    text-align: left;
+  }
+  .history-list::-webkit-scrollbar { width: 5px; }
+  .history-list::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  .history-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(148,163,184,0.08);
+    font-size: 0.85rem;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: translateX(0); } }
+  .history-time { color: #64748b; font-family: monospace; font-size: 0.8rem; }
+  .history-pct { color: #38bdf8; font-weight: 700; }
+  .history-cm { color: #94a3b8; font-size: 0.75rem; margin-left: 0.5rem; }
+
+  .footer {
+    margin-top: 2rem;
+    font-size: 0.7rem;
+    color: #334155;
+    text-align: center;
+  }
+</style>
+<base target="_blank">
+</head>
+<body>
+
+<h1>💧 SMART WATER TANK</h1>
+<div class="subtitle">Kerala Home Automation</div>
+
+<div class="status-bar">
+  <div class="status-dot" id="statusDot"></div>
+  <span id="statusText">Connecting to HiveMQ...</span>
+</div>
+
+<div class="dashboard">
+  <!-- Main Tank Card -->
+  <div class="card">
+    <div class="tank-wrap">
+      <div class="water" id="waterLevel" style="height: 0%"></div>
+    </div>
+    <div class="percent-value" id="percentDisplay">--</div>
+    <div class="percent-label">Percent Full</div>
+
+    <div class="metric-row">
+      <div class="metric">
+        <div class="metric-value" id="cmDisplay">--</div>
+        <div class="metric-label">Distance (cm)</div>
+      </div>
+      <div class="metric">
+        <div class="metric-value" id="volDisplay">--</div>
+        <div class="metric-label">Est. Liters</div>
+      </div>
+    </div>
+
+    <div class="timestamp" id="timeDisplay">Waiting for first reading...</div>
+  </div>
+
+  <!-- History Card -->
+  <div class="card history-card">
+    <div class="history-title">Recent Readings</div>
+    <div class="history-list" id="historyList">
+      <div class="history-item" style="color:#64748b; justify-content:center;">No data yet</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer">NodeMCU + JSN-SR04T + HiveMQ Cloud</div>
+
+<script>
+// ==================== CONFIG ====================
+const MQTT_BROKER = "51552d777a9f492cba1b3cc4ef6b37a9.s1.eu.hivemq.cloud";
+const MQTT_PORT   = 8884;   // WSS (Secure WebSocket)
+const MQTT_TOPIC  = "home/devices/sensors/watertank";
+const MQTT_USER   = "NodeMCU";
+const MQTT_PASS   = "Hivemq@1976";
+const TANK_MAX_L  = 1500;   // Your tank capacity
+
+// ==================== STATE ====================
+let client = null;
+let reconnectTimer = null;
+const history = [];
+
+// ==================== UI ====================
+function setStatus(connected, msg) {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  if (connected) {
+    dot.classList.add('connected');
+    txt.textContent = msg || "Live • HiveMQ Cloud";
+  } else {
+    dot.classList.remove('connected');
+    txt.textContent = msg || "Disconnected";
+  }
+}
+
+function updateDisplay(data) {
+  const pct = Math.max(0, Math.min(100, data.percentage || 0));
+  const cm  = data.raw_cm || 0;
+  const ts  = data.timestamp || new Date().toLocaleString('en-IN');
+  const liters = Math.round((pct / 100) * TANK_MAX_L);
+
+  // Animate tank
+  document.getElementById('waterLevel').style.height = pct + '%';
+
+  // Numbers
+  document.getElementById('percentDisplay').textContent = pct.toFixed(1) + '%';
+  document.getElementById('cmDisplay').textContent = cm.toFixed(1);
+  document.getElementById('volDisplay').textContent = liters;
+  document.getElementById('timeDisplay').textContent = ts;
+
+  // Color shift based on level
+  const water = document.getElementById('waterLevel');
+  if (pct < 15) {
+    water.style.background = 'linear-gradient(180deg, #f87171 0%, #dc2626 100%)';
+  } else if (pct < 40) {
+    water.style.background = 'linear-gradient(180deg, #fbbf24 0%, #d97706 100%)';
+  } else {
+    water.style.background = 'linear-gradient(180deg, #38bdf8 0%, #0ea5e9 40%, #0284c7 100%)';
+  }
+
+  // History
+  const timeOnly = ts.includes(' ') ? ts.split(' ')[1] : ts;
+  history.unshift({ t: timeOnly, pct: pct, cm: cm });
+  if (history.length > 10) history.pop();
+  renderHistory();
+}
+
+function renderHistory() {
+  const list = document.getElementById('historyList');
+  if (history.length === 0) return;
+  list.innerHTML = history.map(h => `
+    <div class="history-item">
+      <span class="history-time">${h.t}</span>
+      <span>
+        <span class="history-pct">${h.pct.toFixed(1)}%</span>
+        <span class="history-cm">${h.cm.toFixed(0)}cm</span>
+      </span>
+    </div>
+  `).join('');
+}
+
+// ==================== MQTT ====================
+function connectMQTT() {
+  const clientId = "webTank_" + Math.random().toString(16).substr(2, 10);
+
+  client = new Paho.MQTT.Client(MQTT_BROKER, MQTT_PORT, "/mqtt", clientId);
+
+  client.onConnectionLost = function(resp) {
+    console.warn("Connection lost:", resp.errorMessage);
+    setStatus(false, "Reconnecting...");
+    scheduleReconnect();
+  };
+
+  client.onMessageArrived = function(msg) {
+    try {
+      const payload = JSON.parse(msg.payloadString);
+      console.log("RX:", payload);
+      updateDisplay(payload);
+    } catch (e) {
+      console.log("Non-JSON:", msg.payloadString);
+    }
+  };
+
+  setStatus(false, "Connecting...");
+
+  client.connect({
+    useSSL: true,
+    userName: MQTT_USER,
+    password: MQTT_PASS,
+    onSuccess: function() {
+      console.log("MQTT connected");
+      setStatus(true, "Live • HiveMQ Cloud");
+      client.subscribe(MQTT_TOPIC);
+    },
+    onFailure: function(err) {
+      console.error("MQTT failed:", err);
+      setStatus(false, "Connection failed — retrying");
+      scheduleReconnect();
+    },
+    keepAliveInterval: 30,
+    reconnect: false   // we handle manually for better control
+  });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectMQTT, 5000);
+}
+
+// ==================== INIT ====================
+connectMQTT();
+</script>
+
+</body>
+</html>
