@@ -1,0 +1,278 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
+#include <time.h>
+
+// ==================== CONFIG ====================
+
+// WiFi
+const char* ssid = "wifi_ssid";
+const char* password = " password";
+
+// HiveMQ Cloud (TLS)
+const char* mqtt_broker = "abcdef.s1.eu.hivemq.cloud";
+const int mqtt_port = 8883;
+const char* mqtt_username = "NodeMCU";
+const char* mqtt_password = "Hivemq@1976";
+const char* CLIENT_ID = "abcdef";
+const char* mqtt_topic_json = "home/devices/sensors/watertank";
+
+// NTP (India IST = UTC+5:30)
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 19800;   // 5.5 hours
+const int daylightOffset_sec = 0;
+
+// Tank calibration — MEASURE YOUR TANK AND UPDATE THESE
+const float TANK_FULL_CM = 22.0;    // sensor to water surface when tank is full
+const float TANK_EMPTY_CM = 120.0;  // sensor to tank bottom when empty
+
+// Pins
+#define TRIG_PIN D6
+#define ECHO_PIN D5
+
+// OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// ==================== GLOBALS ====================
+
+WiFiClientSecure espClient;
+PubSubClient client(espClient);
+
+unsigned long lastReconnectAttempt = 0;
+unsigned long lastSensorRead = 0;
+const unsigned long READ_INTERVAL = 1000; // 1 second
+
+// ==================== SETUP ====================
+
+void setup_wifi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    delay(250);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\nWiFi OK, IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi FAILED");
+  }
+}
+
+void setup_ntp() {
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("NTP started (IST UTC+5:30)");
+}
+
+bool mqtt_reconnect() {
+  if (client.connected()) return true;
+  
+  Serial.print("MQTT connecting...");
+  espClient.setInsecure(); // TLS without CA cert (test only — fine for HiveMQ test)
+  
+  if (client.connect(CLIENT_ID, mqtt_username, mqtt_password)) {
+    Serial.println(" connected");
+    return true;
+  } else {
+    Serial.print(" failed, rc=");
+    Serial.println(client.state());
+    return false;
+  }
+}
+
+String getTimestamp() {
+  time_t now = time(nullptr);
+  struct tm* timeinfo = localtime(&now);
+  
+  if (timeinfo->tm_year < (2020 - 1900)) {
+    return "1970-01-01 00:00:00"; // not synced yet
+  }
+  
+  char buf[25];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", timeinfo);
+  return String(buf);
+}
+
+void updateDisplay(float distance, float percent, const String& ts) {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  
+  // Title
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("Water Tank Level");
+  display.drawFastHLine(0, 10, 128, SSD1306_WHITE);
+  
+  if (isnan(distance)) {
+    display.setCursor(0, 25);
+    display.setTextSize(2);
+    display.println("No Echo");
+  } else {
+    // Big distance
+    display.setCursor(0, 16);
+    display.setTextSize(2);
+    display.print((int)distance);
+    display.print(".");
+    display.print((int)((distance - (int)distance) * 10));
+    display.setTextSize(1);
+    display.print("cm");
+    
+    // Percentage
+    display.setCursor(0, 36);
+    display.setTextSize(1);
+    display.print("Fill: ");
+    display.print((int)percent);
+    display.print("%");
+    
+    // Raw for debug
+    display.setCursor(0, 46);
+    display.print("Raw:");
+    display.print(distance, 1);
+  }
+  
+  // Small timestamp at bottom
+  display.setCursor(0, 56);
+  display.setTextSize(1);
+  if (ts.startsWith("1970")) {
+    display.print("Syncing time...");
+  } else {
+    // Show DD/MM HH:MM
+    display.print(ts.substring(8, 10));
+    display.print("/");
+    display.print(ts.substring(5, 7));
+    display.print(" ");
+    display.print(ts.substring(11, 16));
+  }
+  
+  display.display();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  // Init OLED
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("OLED init failed"));
+    for (;;);
+  }
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("Booting...");
+  display.display();
+  
+  setup_wifi();
+  setup_ntp();
+  
+  client.setServer(mqtt_broker, mqtt_port);
+  
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("WiFi OK");
+  display.println("MQTT Ready");
+  display.display();
+  delay(800);
+}
+
+// ==================== LOOP ====================
+
+void loop() {
+  unsigned long now = millis();
+  
+  // Keep WiFi alive
+  if (WiFi.status() != WL_CONNECTED) {
+    setup_wifi();
+  }
+  
+  // Keep MQTT alive (non-blocking retry every 5s)
+  if (!client.connected()) {
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      if (mqtt_reconnect()) {
+        lastReconnectAttempt = 0;
+      }
+    }
+  } else {
+    client.loop();
+  }
+  
+  // Sensor + Publish every 1 second
+  if (now - lastSensorRead >= READ_INTERVAL) {
+    lastSensorRead = now;
+    
+    // --- Read JSN-SR04T ---
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(20);
+    digitalWrite(TRIG_PIN, LOW);
+    
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    float distance_cm = NAN;
+    float percent = NAN;
+    
+    if (duration > 0) {
+      distance_cm = duration * 0.0343 / 2.0;
+      percent = (TANK_EMPTY_CM - distance_cm) / (TANK_EMPTY_CM - TANK_FULL_CM) * 100.0;
+      if (percent > 100.0) percent = 100.0;
+      if (percent < 0.0) percent = 0.0;
+    }
+    
+    // --- Get Time ---
+    String timestamp = getTimestamp();
+    
+    // --- Update OLED ---
+    updateDisplay(distance_cm, percent, timestamp);
+    
+    // --- Build & Publish JSON ---
+    if (client.connected() && !isnan(distance_cm)) {
+      StaticJsonDocument<256> doc;
+      doc["timestamp"] = timestamp;
+      doc["raw_cm"] = round(distance_cm * 10.0) / 10.0;      // 1 decimal
+      doc["percentage"] = round(percent * 10.0) / 10.0;       // 1 decimal
+      
+      char payload[256];
+      serializeJson(doc, payload);
+      
+      Serial.print("TX: ");
+      Serial.println(payload);
+      
+      if (client.publish(mqtt_topic_json, payload)) {
+        Serial.println("   Publish OK");
+      } else {
+        Serial.println("   Publish FAILED (buffer/size issue?)");
+      }
+    } else {
+      if (!client.connected()) Serial.println("MQTT offline");
+      if (isnan(distance_cm)) Serial.println("Sensor timeout");
+    }
+    
+    // --- Serial Debug ---
+    if (!isnan(distance_cm)) {
+      Serial.print("Dist: ");
+      Serial.print(distance_cm, 1);
+      Serial.print(" cm | Fill: ");
+      Serial.print((int)percent);
+      Serial.println("%");
+    }
+  }
+}
