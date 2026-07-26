@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Smart Water Tank — Kerala</title>
-<script src="https://unpkg.com/paho-mqtt@1.1.0/paho-mqtt-min.js"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.esm.js" type="module"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -63,7 +63,6 @@
   }
   .card:hover { transform: translateY(-2px); }
 
-  /* Tank Animation */
   .tank-wrap {
     position: relative;
     width: 160px;
@@ -217,7 +216,6 @@
 </div>
 
 <div class="dashboard">
-  <!-- Main Tank Card -->
   <div class="card">
     <div class="tank-wrap">
       <div class="water" id="waterLevel" style="height: 0%"></div>
@@ -239,7 +237,6 @@
     <div class="timestamp" id="timeDisplay">Waiting for first reading...</div>
   </div>
 
-  <!-- History Card -->
   <div class="card history-card">
     <div class="history-title">Recent Readings</div>
     <div class="history-list" id="historyList">
@@ -250,18 +247,18 @@
 
 <div class="footer">NodeMCU + JSN-SR04T + HiveMQ Cloud</div>
 
-<script>
+<script type="module">
+import mqtt from 'https://unpkg.com/mqtt/dist/mqtt.esm.js';
+
 // ==================== CONFIG ====================
-const MQTT_BROKER = "51552d777a9f492cba1b3cc4ef6b37a9.s1.eu.hivemq.cloud";
-const MQTT_PORT   = 8884;   // WSS (Secure WebSocket)
-const MQTT_TOPIC  = "home/devices/sensors/watertank";
-const MQTT_USER   = "Read_only";
-const MQTT_PASS   = "Hivemq@1976";
-const TANK_MAX_L  = 1500;   // Your tank capacity
+const MQTT_BROKER = 'wss://51552d777a9f492cba1b3cc4ef6b37a9.s1.eu.hivemq.cloud:8884/mqtt';
+const MQTT_TOPIC  = 'home/devices/sensors/watertank';
+const MQTT_USER   = 'Read_only';
+const MQTT_PASS   = 'Hivemq@1976';
+const TANK_MAX_L  = 1500;
 
 // ==================== STATE ====================
 let client = null;
-let reconnectTimer = null;
 const history = [];
 
 // ==================== UI ====================
@@ -270,10 +267,10 @@ function setStatus(connected, msg) {
   const txt = document.getElementById('statusText');
   if (connected) {
     dot.classList.add('connected');
-    txt.textContent = msg || "Live • HiveMQ Cloud";
+    txt.textContent = msg || 'Live • HiveMQ Cloud';
   } else {
     dot.classList.remove('connected');
-    txt.textContent = msg || "Disconnected";
+    txt.textContent = msg || 'Disconnected';
   }
 }
 
@@ -283,16 +280,8 @@ function updateDisplay(data) {
   const ts  = data.timestamp || new Date().toLocaleString('en-IN');
   const liters = Math.round((pct / 100) * TANK_MAX_L);
 
-  // Animate tank
   document.getElementById('waterLevel').style.height = pct + '%';
 
-  // Numbers
-  document.getElementById('percentDisplay').textContent = pct.toFixed(1) + '%';
-  document.getElementById('cmDisplay').textContent = cm.toFixed(1);
-  document.getElementById('volDisplay').textContent = liters;
-  document.getElementById('timeDisplay').textContent = ts;
-
-  // Color shift based on level
   const water = document.getElementById('waterLevel');
   if (pct < 15) {
     water.style.background = 'linear-gradient(180deg, #f87171 0%, #dc2626 100%)';
@@ -302,7 +291,11 @@ function updateDisplay(data) {
     water.style.background = 'linear-gradient(180deg, #38bdf8 0%, #0ea5e9 40%, #0284c7 100%)';
   }
 
-  // History
+  document.getElementById('percentDisplay').textContent = pct.toFixed(1) + '%';
+  document.getElementById('cmDisplay').textContent = cm.toFixed(1);
+  document.getElementById('volDisplay').textContent = liters;
+  document.getElementById('timeDisplay').textContent = ts;
+
   const timeOnly = ts.includes(' ') ? ts.split(' ')[1] : ts;
   history.unshift({ t: timeOnly, pct: pct, cm: cm });
   if (history.length > 10) history.pop();
@@ -325,50 +318,56 @@ function renderHistory() {
 
 // ==================== MQTT ====================
 function connectMQTT() {
-  const clientId = "webTank_" + Math.random().toString(16).substr(2, 10);
+  setStatus(false, 'Connecting...');
+  console.log('Connecting to:', MQTT_BROKER);
 
-  client = new Paho.MQTT.Client(MQTT_BROKER, MQTT_PORT, "/mqtt", clientId);
+  const clientId = 'webTank_' + Math.random().toString(16).substr(2, 8);
 
-  client.onConnectionLost = function(resp) {
-    console.warn("Connection lost:", resp.errorMessage);
-    setStatus(false, "Reconnecting...");
-    scheduleReconnect();
-  };
+  client = mqtt.connect(MQTT_BROKER, {
+    clientId: clientId,
+    username: MQTT_USER,
+    password: MQTT_PASS,
+    clean: true,
+    connectTimeout: 10000,
+    reconnectPeriod: 5000,
+  });
 
-  client.onMessageArrived = function(msg) {
+  client.on('connect', () => {
+    console.log('MQTT connected!');
+    setStatus(true, 'Live • HiveMQ Cloud');
+    client.subscribe(MQTT_TOPIC, (err) => {
+      if (err) {
+        console.error('Subscribe error:', err);
+      } else {
+        console.log('Subscribed to:', MQTT_TOPIC);
+      }
+    });
+  });
+
+  client.on('message', (topic, message) => {
     try {
-      const payload = JSON.parse(msg.payloadString);
-      console.log("RX:", payload);
+      const payload = JSON.parse(message.toString());
+      console.log('RX:', payload);
       updateDisplay(payload);
     } catch (e) {
-      console.log("Non-JSON:", msg.payloadString);
+      console.log('Non-JSON:', message.toString());
     }
-  };
-
-  setStatus(false, "Connecting...");
-
-  client.connect({
-    useSSL: true,
-    userName: MQTT_USER,
-    password: MQTT_PASS,
-    onSuccess: function() {
-      console.log("MQTT connected");
-      setStatus(true, "Live • HiveMQ Cloud");
-      client.subscribe(MQTT_TOPIC);
-    },
-    onFailure: function(err) {
-      console.error("MQTT failed:", err);
-      setStatus(false, "Connection failed — retrying");
-      scheduleReconnect();
-    },
-    keepAliveInterval: 30,
-    reconnect: false   // we handle manually for better control
   });
-}
 
-function scheduleReconnect() {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectMQTT, 5000);
+  client.on('error', (err) => {
+    console.error('MQTT Error:', err.message);
+    setStatus(false, 'Error: ' + err.message);
+  });
+
+  client.on('close', () => {
+    console.log('MQTT disconnected');
+    setStatus(false, 'Reconnecting...');
+  });
+
+  client.on('offline', () => {
+    console.log('MQTT offline');
+    setStatus(false, 'Offline');
+  });
 }
 
 // ==================== INIT ====================
