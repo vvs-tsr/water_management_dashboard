@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Smart Water Tank — Kerala</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.esm.js" type="module"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -62,6 +63,22 @@
     transition: transform 0.2s;
   }
   .card:hover { transform: translateY(-2px); }
+
+  /* ---- Glass-morphism Chart Card (HomeAssistant bubble style) ---- */
+  .chart-card {
+    background: rgba(30, 30, 30, 0.45) !important;
+    backdrop-filter: blur(12px) !important;
+    -webkit-backdrop-filter: blur(12px) !important;
+    border-radius: 16px !important;
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25) !important;
+    padding: 1.2rem 1.5rem;
+  }
+  .chart-wrap {
+    position: relative;
+    height: 220px;
+    width: 100%;
+  }
 
   .tank-wrap {
     position: relative;
@@ -237,6 +254,14 @@
     <div class="timestamp" id="timeDisplay">Waiting for first reading...</div>
   </div>
 
+  <!-- Glass-morphism Trend Chart Card -->
+  <div class="card chart-card">
+    <div class="history-title">Level Trend</div>
+    <div class="chart-wrap">
+      <canvas id="trendChart"></canvas>
+    </div>
+  </div>
+
   <div class="card history-card">
     <div class="history-title">Recent Readings</div>
     <div class="history-list" id="historyList">
@@ -260,6 +285,7 @@ const TANK_MAX_L  = 1000;
 // ==================== STATE ====================
 let client = null;
 const history = [];
+let trendChart = null;
 
 // ==================== UI ====================
 function setStatus(connected, msg) {
@@ -300,6 +326,7 @@ function updateDisplay(data) {
   history.unshift({ t: timeOnly, pct: pct, cm: cm });
   if (history.length > 10) history.pop();
   renderHistory();
+  updateChart();
 }
 
 function renderHistory() {
@@ -314,6 +341,81 @@ function renderHistory() {
       </span>
     </div>
   `).join('');
+}
+
+// ==================== CHART ====================
+function initChart() {
+  const ctx = document.getElementById('trendChart').getContext('2d');
+  trendChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Water Level %',
+        data: [],
+        borderColor: '#ffffff',
+        backgroundColor: 'rgba(56, 189, 248, 0.15)',
+        borderWidth: 2,
+        tension: 0.4,
+        fill: true,
+        pointBackgroundColor: '#ffffff',
+        pointBorderColor: '#38bdf8',
+        pointRadius: 3,
+        pointHoverRadius: 5,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: 'rgba(15, 23, 42, 0.9)',
+          titleColor: '#ffffff',
+          bodyColor: '#ffffff',
+          borderColor: 'rgba(255, 255, 255, 0.15)',
+          borderWidth: 1,
+          padding: 10,
+          displayColors: false,
+        }
+      },
+      scales: {
+        x: {
+          ticks: {
+            color: 'rgba(255, 255, 255, 0.7)',
+            font: { size: 10 }
+          },
+          grid: {
+            color: 'rgba(255, 255, 255, 0.08)'
+          }
+        },
+        y: {
+          min: 0,
+          max: 100,
+          ticks: {
+            color: 'rgba(255, 255, 255, 0.7)',
+            font: { size: 10 },
+            stepSize: 20
+          },
+          grid: {
+            color: 'rgba(255, 255, 255, 0.08)'
+          }
+        }
+      },
+      interaction: {
+        mode: 'index',
+        intersect: false,
+      },
+    }
+  });
+}
+
+function updateChart() {
+  if (!trendChart) return;
+  const chartData = [...history].reverse();
+  trendChart.data.labels = chartData.map(h => h.t);
+  trendChart.data.datasets[0].data = chartData.map(h => h.pct);
+  trendChart.update('none');
 }
 
 // ==================== MQTT ====================
@@ -371,6 +473,7 @@ function connectMQTT() {
 }
 
 // ==================== INIT ====================
+initChart();
 connectMQTT();
 </script>
 
